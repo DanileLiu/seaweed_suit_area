@@ -1,0 +1,763 @@
+---
+title: "Results summarise and plotting"
+output: html_notebook
+---
+
+```{r}
+suppressPackageStartupMessages(library(terra))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(patchwork))
+suppressPackageStartupMessages(library(tidyterra))
+suppressPackageStartupMessages(library(rnaturalearth))
+suppressPackageStartupMessages(library(sf))
+
+```
+
+### Difine path
+
+```{r}
+TIF_DIR <- './Data/server/consensus_05_tif/'
+ALL_TIF <- list.files(TIF_DIR, 
+                      pattern = '.tif$',
+                      full.names = T)
+```
+
+### load all output rasters
+
+```{r}
+raw_tif <- rast(ALL_TIF)
+```
+
+```{r}
+combined_tif <- sum(raw_tif, na.rm = T)
+```
+
+#### Oytput the combination of rasters
+
+```{r}
+writeRaster(combined_tif,
+            'Results/suitable_area_raw_no_small.tif')
+```
+
+### Group data by Exclusive Econimic Zones (EEZ)
+
+```{r}
+# all eez
+EEZ_FOLDER <- './Maps/Splited_EEZ'
+eez_files <- list.files(EEZ_FOLDER, 
+                        pattern = '.shp$', full.names = T)
+suit_area_glob <- rast('Results/suitable_area_raw_no_small.tif')
+```
+
+#### Summarise area inside EEZs by country
+
+```{r}
+stat_df <- tibble()
+
+for (i in 1:length(eez_files)) {
+    FILE <- eez_files[i]
+    eez <- vect(FILE)
+    croped <- crop(suit_area_glob, eez, snap = 'in')
+    masked <- mask(croped, eez)
+    values(masked)[values(masked) <= 0] = NA
+    
+    eez_stat <- tibble(
+        country = str_split(str_split(FILE, '/',simplify = T)[4],pattern = '\\.', simplify = T)[1],
+        eez_area = expanse(eez, unit = 'km'),
+        sui_area = expanse(masked, unit = 'km'),
+        sui_ratio = sui_area/eez_area
+    )
+    
+    stat_df <- bind_rows(stat_df, eez_stat)
+}
+```
+
+```{r}
+stat_df |> 
+    group_by(country) |> 
+    summarise(sui_area = mean(sui_area),
+              eez_area = sum(eez_area)) |> 
+    ungroup() |> 
+    mutate(sui_ratio = sui_area/eez_area) |> 
+    filter(sui_ratio <= 1) |> 
+    arrange(desc(sui_area)) |> 
+    write_csv('country_stat.csv')
+```
+
+### Check AUC value
+
+```{r}
+AUC_FILES <- list.files('Data/server/consensus_05_final_stat/',
+                        pattern = '.csv',
+                        full.names = T)
+```
+
+```{r}
+mod_stats <- map(AUC_FILES, read.csv)
+
+mod_stats <- bind_rows(mod_stats) |> 
+    select(-X)
+```
+
+```{r}
+auc_p_A <- ggplot(mod_stats) +
+    geom_boxplot(aes(x = str_to_title(algorithm), y = AUC)) +
+    geom_hline(yintercept = 0.5, lty = 'dashed', color = 'red') +
+    labs(x = 'Algorithm') +
+    theme_bw(base_size = 12, 
+             base_family = 'Arial') +
+    theme(axis.text.x = element_text(angle = 30, 
+                                     vjust = 1, hjust = 1, size = 8))
+```
+
+```{r}
+abb_sci_name <- function(sci_name){
+    genus <- str_split(sci_name, ' ', simplify = T)[1]
+    spe <- str_split(sci_name, ' ', simplify = T)[2]
+    
+    genus_abb <- paste0(str_extract_all(genus, '[A-z]', simplify = T)[1],
+                        '.')
+    abb_spe <- paste0(genus_abb, spe)
+    return(abb_spe)
+}
+
+mod_stats <- mod_stats |> 
+    group_by(species_name) |> 
+    mutate(species = abb_sci_name(species_name)) |> 
+    ungroup()
+
+auc_p_b <- ggplot(mod_stats) +
+    geom_violin(aes(x = str_to_title(species), y = AUC)) +
+    geom_hline(yintercept = 0.5, lty = 'dashed', color = 'red') +
+    labs(x = 'Species') +
+    theme_bw(base_size = 12, 
+             base_family = 'Arial') +
+    theme(axis.text.x = element_text(angle = 30, 
+                                     vjust = 1, hjust = 1, size = 8))
+```
+
+#### Save out auc ckeck
+
+```{r}
+auc_p <- (auc_p_A | auc_p_b) +
+    plot_annotation(tag_levels = 'A') +
+    plot_layout(widths = c(1, 3))
+
+ggsave(filename = 'auc_fig.eps', 
+       width = 180, height = 85,
+       units = 'mm')
+```
+
+### Draw richness plot for check
+
+```{r}
+RICHNESS_TIF <- 'Results/suitable_area_raw_no_small.tif'
+
+rich_map <- rast(RICHNESS_TIF)
+
+values(rich_map)[values(rich_map) <= 0] = NA
+
+NE_WORLD <- ne_download(scale = 50,
+                        destdir = './Maps/NE_WORLD',
+                        returnclass = 'sp',
+                        load = T)
+```
+
+#### Plotting
+
+```{r}
+glob_sui_area <- ggplot() +
+    geom_spatraster(data = rich_map, interpolate = T) + 
+    geom_spatvector(data = vect(NE_WORLD),
+                    color = 'grey', size = .1, 
+                    fill = 'white') +
+    scale_fill_whitebox_c(
+        palette = "muted",
+        guide = guide_colorbar(direction = 'horizontal',
+                               title.position = 'top',
+                               barwidth = 20,
+                               barheight = .3)) +
+    theme_minimal() +
+    theme(legend.position = 'top', 
+          plot.margin = unit(c(0, 0, 0, 0), units = 'mm')) +
+    labs(fill = 'Potential farming species richness')
+
+glob_sui_area_base <- ggplot() +
+    geom_spatraster(data = rich_map, interpolate = T,
+                    maxcell = 10e6) + 
+    geom_spatvector(data = vect(NE_WORLD),
+                    color = 'grey', size = .1, 
+                    fill = 'white') +
+    scale_fill_whitebox_c(
+        palette = "muted",
+        guide = guide_colorbar(direction = 'horizontal',
+                               title.position = 'top',
+                               barwidth = 20,
+                               barheight = .3)) +
+    theme(legend.position = 'top', 
+          plot.margin = unit(c(0, 0, 0, 0), units = 'mm')) +
+    theme_minimal() 
+
+north_sea_sui_area <- glob_sui_area_base + 
+    scale_x_continuous(limits = c(-15, 10), n.breaks = 5) +
+    scale_y_continuous(limits = c(50, 65),
+                       breaks = c(50, 55, 60, 64)) +
+    theme(legend.position = 'none', 
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+
+north_east_asia_sui_area <- glob_sui_area_base + 
+    scale_x_continuous(limits = c(116, 146), n.breaks = 5) +
+    scale_y_continuous(limits = c(28, 48), n.breaks = 4) +
+    theme(legend.position = 'none',
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+
+south_au_sui_area <- glob_sui_area_base + 
+    scale_x_continuous(limits = c(125, 155), n.breaks = 5) +
+    scale_y_continuous(limits = c(-48, -28), n.breaks = 4) +
+    theme(legend.position = 'none',
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+
+```
+
+```{r}
+rich_plot_main <- (glob_sui_area / 
+     (north_sea_sui_area | north_east_asia_sui_area | south_au_sui_area)) +
+    plot_annotation(tag_levels = 'A') +
+    plot_layout(heights = c(1.3, 1),
+                widths = c(.8, 1))
+```
+
+```{r}
+ggsave('rich_plot_main.pdf', 
+       rich_plot_main,
+       width = 180, height = 160,
+       units = 'mm')
+```
+
+
+#### Figure in Supplementary
+
+
+```{r}
+# Supplementary
+nz_sui_area <- glob_sui_area_base + 
+    scale_x_continuous(limits = c(150, 180)) +
+    scale_y_continuous(limits = c(-52, -32)) +
+    theme(legend.position = 'top', 
+          plot.margin = unit(c(0, 0, 0, 0), units = 'mm'),
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1)) +
+    labs(fill = 'Potential farming species richness')
+
+us_east_sui_area <- glob_sui_area_base + 
+    scale_x_continuous(limits = c(-75, -60)) +
+    scale_y_continuous(limits = c(40, 50)) +
+    theme(legend.position = 'none', 
+          plot.margin = unit(c(0, 0, 0, 0), units = 'mm'),
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+
+us_ca_west_sui_area <- glob_sui_area_base + 
+    scale_x_continuous(limits = c(-150, -120)) +
+    scale_y_continuous(limits = c(45, 65)) +
+    theme(legend.position = 'none', 
+          plot.margin = unit(c(0, 0, 0, 0), units = 'mm'),
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+
+latin_south_sui_area <- glob_sui_area_base + 
+    scale_x_continuous(limits = c(-80, -60)) +
+    scale_y_continuous(limits = c(-50, -35)) +
+    theme(legend.position = 'none', 
+          plot.margin = unit(c(0, 0, 0, 0), units = 'mm'),
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+```
+
+
+```{r}
+nz_sui_area
+us_east_sui_area
+us_ca_west_sui_area
+latin_south_sui_area
+```
+
+```{r}
+rich_plot_spp <- (((nz_sui_area | us_east_sui_area) /
+                      (us_ca_west_sui_area | latin_south_sui_area)) +
+    plot_annotation(tag_levels = 'A') +
+    plot_layout(heights = c(1, 1),
+                widths = c(1, 1),
+                guides = 'collect')) &
+    theme(legend.position = 'top')
+```
+
+保存
+
+```{r}
+ggsave('rich_plot_spp.pdf', 
+       rich_plot_spp,
+       width = 180, height = 170,
+       units = 'mm')
+```
+
+### Compare between species
+
+
+```{r}
+spe_comp <- raw_tif
+values(spe_comp)[values(spe_comp) <= 0] <- NA
+
+names(spe_comp) <- str_split(names(raw_tif), '_', simplify = T)[,1]
+```
+
+
+```{r}
+spe_comp_supp_a <- ggplot() +
+    geom_spatraster(data = spe_comp[[1:8]]) +
+    facet_wrap(~lyr, ncol = 2) +
+    scale_fill_whitebox_c(guide = 'none',
+                          palette = "viridi") +
+    theme_minimal()
+
+spe_comp_supp_b <- ggplot() +
+    geom_spatraster(data = spe_comp[[9:16]]) +
+    facet_wrap(~lyr, ncol = 2) +
+    scale_fill_whitebox_c(guide = 'none',
+                          palette = "viridi") +
+    theme_minimal()
+
+spe_comp_supp_c <- ggplot() +
+    geom_spatraster(data = spe_comp[[17:21]]) +
+    facet_wrap(~lyr, ncol = 2) +
+    scale_fill_whitebox_c(guide = 'none',
+                          palette = "viridi") +
+    theme_minimal()
+```
+
+```{r}
+ggsave('spe_comp_supp_a.pdf', 
+       spe_comp_supp_a,
+       width = 180, height = 210,
+       units = 'mm')
+
+ggsave('spe_comp_supp_b.pdf', 
+       spe_comp_supp_b,
+       width = 180, height = 210,
+       units = 'mm')
+
+ggsave('spe_comp_supp_c.pdf', 
+       spe_comp_supp_c,
+       width = 180, height = 190,
+       units = 'mm')
+```
+
+#### Compare between suitable area in countries
+
+```{r}
+spe_sui_area <- c()
+
+for (i in 1:dim(spe_comp)[3]) {
+    sui_area <- expanse(spe_comp[[i]], unit = 'km')
+    
+    spe_sui_area <- c(spe_sui_area, sui_area)
+}
+
+spe_sui_area_tibble <- tibble(species = names(spe_comp),
+                              suitable_area = spe_sui_area)
+
+spe_sui_area_tibble
+```
+
+
+```{r}
+abb_sci_name <- function(sci_name){
+    genus <- str_split(sci_name, ' ', simplify = T)[1]
+    spe <- str_split(sci_name, ' ', simplify = T)[2]
+    
+    genus_abb <- paste0(str_extract_all(genus, '[A-z]', simplify = T)[1],
+                        '.')
+    abb_spe <- paste0(genus_abb, spe)
+    return(abb_spe)
+}
+
+ranked_species <- spe_sui_area_tibble |> 
+    arrange(desc(suitable_area)) |> 
+    group_by(species) |> 
+    mutate(species = abb_sci_name(species)) |> 
+    ungroup() |> 
+    pull(species)
+```
+
+
+```{r}
+spe_sui_area_tibble <- spe_sui_area_tibble |> 
+    group_by(species) |> 
+    mutate(species = abb_sci_name(species)) |> 
+    ungroup() |> 
+    mutate(species = factor(species, levels = ranked_species),
+           suitable_area = suitable_area * 10e-6) 
+```
+
+```{r}
+# uncertainty between models
+ALL_SIG_MOD <- './Data/server/all_single_partition/'
+all_mod_res <- list.files(ALL_SIG_MOD)
+
+final_tibble <- tibble()
+for (i in 1:length(all_mod_res)) {
+    file_name <- all_mod_res[i]
+    file_path <- paste0(ALL_SIG_MOD, file_name)
+    
+    tif_info <- str_split(file_name, '_', simplify = T)
+    spe_name <- abb_sci_name(tif_info[1])
+    mod_name <- tif_info[2]
+    
+    spe_mod_tif <- rast(file_path)
+    values(spe_mod_tif)[values(spe_mod_tif) <= 0] <- NA
+    spe_mod_area <- expanse(spe_mod_tif, unit = 'km')
+    
+    mod_tibble <- tibble(species = spe_name,
+                         model = mod_name,
+                         area_est = spe_mod_area)
+    final_tibble <- bind_rows(final_tibble, 
+                              mod_tibble)
+}
+
+final_tibble <- final_tibble |> 
+    mutate(area_est = area_est * 1e-6)
+```
+
+```{r}
+algo_sum_spe <- final_tibble |> 
+    group_by(species) |> 
+    summarise(min_area = min(area_est),
+              max_area = max(area_est),
+              avg_area = mean(area_est))
+```
+
+```{r}
+spe_sui_area_tibble_final <- spe_sui_area_tibble |> 
+    left_join(algo_sum_spe, by = 'species') |> 
+    mutate(species = factor(species, 
+                            levels = rev(ranked_species)))
+```
+
+
+```{r}
+spe_comp_main_A <- ggplot(spe_sui_area_tibble_final) +
+    geom_bar(aes(y = species, x = suitable_area, 
+                 fill = suitable_area),
+             stat = 'identity') +
+    geom_errorbar(aes(y = species, 
+                      xmin = min_area, xmax = max_area),
+                  width = .2, 
+                  color = 'grey70', linetype = 'dashed') +
+    geom_point(aes(y = species, x = avg_area)) +
+    labs(x = expression(paste("Suitable farming area (",10^{6}, km^{2},')')),
+         y = 'Species')+
+    scale_x_continuous(limits = c(0, 600), breaks = seq(0, 600, 100)) +
+    theme_minimal() +
+    theme(legend.position = 'none') 
+```
+
+增加产量信息方便分析
+
+```{r}
+PRODUCTION_PATH <- './Data/01_FAO_seaweed.csv'
+NAME_PARSE_TAB_PATH <- './Data/Tables.xlsx'
+
+production_tab <- read_csv(PRODUCTION_PATH)
+name_parse_tab <- readxl::read_excel(NAME_PARSE_TAB_PATH, sheet = 'Species-list')
+```
+
+处理产量数据
+
+```{r}
+name_parse <- name_parse_tab |> 
+    select(-`N. of Records`) |> 
+    rename(Sci_name = `WRoMS-Scientific Name`)
+
+production_tab_tidy <- production_tab |> 
+    filter(`Environment (Name)` == 'Marine') |> 
+    select(-`Country (Name)`,
+           -`FAO major fishing area (Name)`,
+           -`Environment (Name)`,
+           -`Unit (Name)`,
+           -Unit,
+           -starts_with('S')) |> 
+    rename(`ASFIS Species` = `ASFIS species (Scientific name)`) |> 
+    left_join(name_parse) |> 
+    filter(!is.na(Sci_name)) |> 
+    select(-`ASFIS Species`) |> 
+    pivot_longer(-Sci_name, names_to = 'Year', values_to = 'Production') |> 
+    mutate(Year = str_remove(Year, pattern = '[\\[]'),
+           Year = str_remove(Year, pattern = '[\\]]')) |> 
+    filter(Year >= 2015) |> 
+    group_by(Sci_name) |> 
+    summarise(avg_prod = mean(Production, na.rm = T)) |> 
+    ungroup()
+
+production_tab_tidy <- production_tab_tidy |> 
+    group_by(Sci_name) |>
+    mutate(Sci_name = abb_sci_name(Sci_name)) |> 
+    ungroup() |> 
+    mutate(Sci_name = factor(Sci_name, 
+                            levels = rev(ranked_species))) |> 
+    filter(!is.na(Sci_name))  # 用于处理Dunaliella salina  
+```
+
+```{r}
+spe_comp_main_B <- ggplot(production_tab_tidy, aes(x = avg_prod * 1e-6, y = Sci_name)) +
+    geom_bar(aes(fill = avg_prod), stat = 'identity') +
+    theme_minimal() +
+    theme(legend.position = 'none') +
+    scale_x_continuous(limits = c(0, 3), breaks = seq(0, 3, .5)) +
+    labs(x = expression(paste("Annual mean production 2015-2019 (", 10^{6}, ' tonnes)')),  y = 'Species')
+```
+
+```{r}
+spe_comp_main <- (spe_comp_main_A | spe_comp_main_B) +
+    plot_annotation(tag_prefix = '(', tag_levels = 'A', tag_suffix = ')')
+```
+
+
+
+```{r}
+ggsave('./spe_comp_main.pdf', 
+       spe_comp_main, 
+       width = 180, height = 85, units = 'mm')
+```
+
+### Compare between countries
+
+#### Main figure
+
+```{r}
+COUNTRY_STAT_PATH <- './Results/country_stat.csv'
+
+country_stat <- read.csv(COUNTRY_STAT_PATH)
+```
+
+```{r}
+NE_WORLD <- ne_download(scale = 50,
+                        destdir = './Maps/NE_WORLD',
+                        returnclass = 'sf',
+                        load = T)
+```
+
+```{r}
+country_comp <- NE_WORLD |> 
+    left_join(country_stat, by = c('SOVEREIGNT' = 'country'))
+
+country_comp_map <- vect(country_comp)
+```
+
+
+```{r}
+country_comp_p <- ggplot() +
+    geom_spatvector(data = country_comp_map,
+                    color = 'grey', size = .1, 
+                    mapping = aes(fill = round(sui_ratio * 100, 2))) +
+    scale_fill_whitebox_c(palette = 'deep', 
+                          guide = guide_colorbar(title.position = 'left', 
+                                                 barheight = .5, 
+                                                 direction = 'horizontal', 
+                                                 barwidth = 15), 
+                          breaks = seq(0, 100, 25)) +
+    labs(fill = 'Proportion (%)') +
+    theme_minimal() +
+    theme(legend.position = 'bottom')
+```
+
+```{r}
+ggsave('country_comp.pdf', country_comp_p, 
+       width = 135, height = 85, units = 'mm')
+```
+
+#### Main figure-2
+
+absolute suitable farming area of top 20 countries
+
+```{r}
+country_t20 <- country_stat[1:20,] %>% 
+    mutate(country = factor(country, 
+                            levels = country_stat$country[1:20]))
+
+country_comp_p2 <- ggplot(country_t20, 
+       aes(x = country, y = sui_area * 1e-6)) +
+    geom_point() +
+    geom_segment(aes(x = country, xend = country, y = 0, yend = sui_area * 1e-6)) +
+    labs(y = expression(paste("Suitable farming area (", 10^{6}, ' ', km^{2}, ')')),
+         x = "") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 30, 
+                                     hjust = 1, vjust = 1)) 
+    
+```
+
+
+```{r}
+country_comp_graph <- (country_comp_p /
+    country_comp_p2) +
+    plot_annotation(tag_prefix = '(', tag_levels = 'A', tag_suffix = ')') +
+    plot_layout(heights = c(2, 1))
+```
+
+```{r}
+ggsave('country_comp_graph.pdf', country_comp_graph, 
+       width = 135, height = 160, units = 'mm')
+```
+
+
+### Production between countries
+
+```{r}
+PRODUCTION_PATH <- './Data/01_FAO_seaweed.csv'
+NAME_PARSE_TAB_PATH <- './Data/Tables.xlsx'
+
+production_tab <- read_csv(PRODUCTION_PATH)
+name_parse_tab <- readxl::read_excel(NAME_PARSE_TAB_PATH, sheet = 'Species-list')
+
+abb_sci_name <- function(sci_name){
+    genus <- str_split(sci_name, ' ', simplify = T)[1]
+    spe <- str_split(sci_name, ' ', simplify = T)[2]
+    
+    genus_abb <- paste0(str_extract_all(genus, '[A-z]', simplify = T)[1],
+                        '.')
+    abb_spe <- paste0(genus_abb, spe)
+    return(abb_spe)
+}
+```
+
+#### Production data pre-process
+
+```{r}
+name_parse <- name_parse_tab |> 
+    select(-`N. of Records`) |> 
+    rename(Sci_name = `WRoMS-Scientific Name`)
+
+production_tab_tidy <- production_tab |> 
+    filter(`Environment (Name)` == 'Marine') |> 
+    select(-`FAO major fishing area (Name)`,
+           -`Environment (Name)`,
+           -`Unit (Name)`,
+           -Unit,
+           -starts_with('S')) |> 
+    rename(`ASFIS Species` = `ASFIS species (Scientific name)`) |> 
+    left_join(name_parse) |> 
+    filter(!is.na(Sci_name)) |> 
+    select(-`ASFIS Species`,
+           -`Sci_name`) |> 
+    pivot_longer(-`Country (Name)`, names_to = 'Year', values_to = 'Production') |> 
+    mutate(Year = str_remove(Year, pattern = '[\\[]'),
+           Year = str_remove(Year, pattern = '[\\]]')) |> 
+    filter(Year >= 2015) |> 
+    group_by(`Country (Name)`) |> 
+    summarise(avg_prod = mean(Production, na.rm = T)) |> 
+    ungroup()
+```
+
+```{r}
+country_production_plot <- ggplot(production_tab_tidy |> filter(avg_prod != 0), 
+       aes(x = `Country (Name)`, y = avg_prod * 1e-6)) +
+    geom_bar(stat = 'identity') +
+    labs(x = 'Country', 
+         y = expression(paste("Production (", 10^{6}, ' tonnes)'))) +
+    theme_minimal() + 
+    theme(legend.position = 'none', 
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+```
+
+#### FOOD BALANCE SHEET pre-process
+
+```{r}
+BALANCE_PATH <- './Data/02_FAO_STAT_FOOD_BALANCE.csv'
+
+balance_tab <- read.csv(BALANCE_PATH)
+```
+
+```{r}
+china_subs <- c('China, Hong Kong SAR',
+                'China, Macao SAR',
+                'China, mainland',
+                'China, Taiwan Province of')
+seaweed_trade_tab <- balance_tab |> 
+    mutate(Value = Value * 1e-3) |> 
+    filter(Year == 2019,
+           Item == 'Aquatic Plants',
+           # Area %in% country_t20$country
+           ) |> 
+    pivot_wider(id_cols = Area,
+                names_from = Element, 
+                values_from = Value) |> 
+    mutate(
+        total_trade = `Export Quantity` + `Import Quantity`,
+        # Area = factor(Area, levels = country_t20$country)
+           ) 
+
+seaweed_trade_tab_t20 <- seaweed_trade_tab |> 
+    select(-Production, 
+           -`Import Quantity`,
+           -`Export Quantity`,
+           -`Other uses (non-food)`,
+           - `Domestic supply quantity`) |> 
+    pivot_longer(c(total_trade,
+                 `Food`),
+                 names_to = 'Variable')
+
+seaweed_trade_prod_on_dom_import <- seaweed_trade_tab |> 
+    mutate(ratio = Production/`Domestic supply quantity` * 100) |> filter(ratio < 100)
+
+seaweed_trade_prod_on_dom_export <- seaweed_trade_tab |> 
+    mutate(ratio = Production/`Domestic supply quantity` * 100) |> filter(ratio > 100)
+```
+
+```{r}
+ggplot(seaweed_trade_prod_on_dom_import,
+       aes(x=Area, y=ratio)) +
+    geom_bar(stat = 'identity', 
+             position = 'dodge') +
+    scale_y_continuous(limits = c(0, 100)) +
+    theme_minimal() + 
+    theme(legend.position = 'none', 
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+```
+
+```{r}
+ggplot(seaweed_trade_prod_on_dom_export,
+       aes(x=Area, y=Production)) +
+    geom_bar(stat = 'identity', 
+             position = 'dodge') +
+    theme_minimal() + 
+    theme(legend.position = 'none', 
+          axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+```
+
+```{r}
+china_subs <- c('China, Hong Kong SAR',
+                'China, Macao SAR',
+                'China, mainland',
+                'China, Taiwan Province of')
+seaweed_trade_tab <- balance_tab |> 
+    mutate(Value = Value * 1e-3) |> 
+    filter(Year == 2019,
+           Item == 'Aquatic Plants',
+           !Area %in% china_subs
+           ) |> 
+    pivot_wider(id_cols = Area,
+                names_from = Element, 
+                values_from = Value) |> 
+    mutate(
+        ratio = Production / `Domestic supply quantity`,
+        tag = if_else(ratio <= 1, 'Importer', 'Exporter')
+           ) 
+```
+
+```{r}
+seaweed_trade_tab |> 
+    filter(Production != 0 & (`Food` != 0 | `Other uses (non-food)` !=0)) |> 
+    write.csv('./Results/fao_food_balance_table.csv')
+```
+
+```{r}
+ggsave('country_production.pdf', country_production_plot, 
+       width = 180, height = 100, units = 'mm')
+```

@@ -1,0 +1,115 @@
+---
+title: "Preprocess occurrence data for species"
+output: html_notebook
+---
+
+### Pre-processing for occurrance data
+
+```{r}
+suppressPackageStartupMessages(library(raster))
+suppressPackageStartupMessages(library(dismo))
+suppressPackageStartupMessages(library(rgeos))
+suppressPackageStartupMessages(library(rgdal))
+suppressPackageStartupMessages(library(sp))
+suppressPackageStartupMessages(library('ENMeval'))
+suppressPackageStartupMessages(library(rJava))
+suppressPackageStartupMessages(library(purrr))
+suppressPackageStartupMessages(library(furrr))
+suppressPackageStartupMessages(library(progressr))
+```
+
+#### load env data
+
+```{r}
+# set data path
+env_data <- '/Volumes/MarSSD/100_cc_imp_seaweed/res-083/ENV_data/current.grd'
+occ_folder <- '/Volumes/MarSSD/100_cc_imp_seaweed/Occurance\ data/species_occ_download'
+
+env <- raster::stack(env_data)
+plot(env)
+```
+
+we got `r length(names(env))`environmental layer，`r paste(names(env), collapse=',')`
+
+### Occurence data
+
+#### load raw occurrance data
+
+```{r}
+occ_data_base_folder <- '/Volumes/MarSSD/100_cc_imp_seaweed/res-083/occ_data/'
+occ_data_ls <- list.files(occ_folder, '.csv', full.names = T)
+
+occ_data_raw <- map(occ_data_ls, read.csv)
+```
+
+#### Make occurance data spatial
+
+```{r}
+make_spatial <- function(df){
+    
+    coordinates(df) <- ~ longitude + latitude
+    crs(df) <- CRS('+init=epsg:4326')
+    
+    return(df)
+}
+
+occ_data_spatial <- map(occ_data_raw, make_spatial)
+```
+
+#### drop points of spatial outliers
+
+drop points with out env data
+
+```{r}
+
+remove_pt_no_env <- function(occ) {
+    
+    conditions_occ <- raster::extract(env, occ, 
+                df = T) 
+    
+    bad_records <- is.na( conditions_occ[, 2:13] )
+    bad_records <- apply(bad_records, 1, sum)
+    occ_unique <- occ[!bad_records,]
+    
+    return(occ_unique)
+}
+
+good_records <- map(occ_data_spatial, remove_pt_no_env)
+```
+
+#### spatial filter
+
+```{r}
+# retain single point for single spatial grid
+
+thin_occ <- function(records){
+    # "thin" occ 数据
+    cells <- cellFromXY(env[[1]], records)
+    dups <- duplicated(cells)
+    occ_final <- records[!dups,]
+    
+    cat(nrow(records) - nrow(occ_final), 'records are removed!\n')
+    return(occ_final)
+}
+
+occ_final <- map(good_records, thin_occ)
+```
+
+```{r}
+
+display_records <- function(sp_df) {
+    cat('Species ', unique(sp_df$dis_name), 'has ',
+        length(sp_df), ' records left.\n')
+}
+
+empty_obj <- map(occ_final, display_records)
+```
+
+#### save clean occurance data
+
+```{r}
+# 保存结果
+readr::write_rds(occ_final, 
+                 paste0(occ_data_base_folder, 'species_occurance_final.rds')
+                 )
+```

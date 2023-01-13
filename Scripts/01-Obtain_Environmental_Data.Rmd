@@ -1,0 +1,97 @@
+---
+title: "01-Environmental Data Projection"
+output: html_notebook
+---
+
+```{r}
+# install.packages('sdmpredictors')
+# install.packages('terra')
+library(sdmpredictors)
+library(leaflet)
+library(raster)
+library(terra)
+```
+
+### Bio-oracle data
+
+Bio-oracle naturally follows spatial resolution of 0.083
+
+```{r}
+# env data required for modelling
+current_env_code <- c(
+    'BO22_damean', # Diffuse attenuation coefficient at 490 nm (mean)
+    'BO22_dissoxmean_ss', # Dissolved oxygen
+    'BO22_nitratemean_ss', # Nitrate
+    'BO22_ph', # pH
+    'BO22_phosphatemean_ss', # Phosphate
+    'BO22_salinitymean_ss', # Salinity
+    'BO22_tempmax_ss', # Sea surface temperature (maximum)
+    'BO22_tempmean_ss', # Sea surface temperature (mean)
+    'BO22_parmean' # Photosynthetically available radiation (mean)
+    )
+
+options(sdmpredictors_datadir="./Data/00_env/01_current") # set folder for data saving
+env_bio <- load_layers(layercodes = current_env_code, 
+                       equalarea = F, rasterstack = T)
+
+# Download 'BO_bathymean' data
+BO_bathymean <- load_layers(layercodes = 'BO_bathymean')
+
+# load Bio-oracle data
+env_bio <- stack(env_bio, BO_bathymean)
+
+raster::res(env_bio)
+```
+
+### GMED data
+
+GMED dataset has the same spatial resolution with Bio-oracle, but should be "aligned" with Bio-oracle manually
+
+```{r}
+# the data has been pre-downloaded from https://gmed.auckland.ac.nz
+gmed_files <- list.files('./Data/00_env/02_stable_phisics/',
+                         pattern = '.asc',
+                         full.names = T)
+
+gmed_raw <- dropLayer(stack(gmed_files), 'slope')
+# "slope" data is missing for costal regions, thus dropped
+# 
+print(raster::res(gmed_raw))
+gmed_raw
+```
+
+#### Regrid GMED data
+
+```{r}
+# Define the grid
+grid_083 <- raster(nrow = nrow(env_bio),
+                    ncol = ncol(env_bio))
+extent(grid_083) <- extent(env_bio)
+```
+
+```{r}
+gmed_083 <- raster::resample(x = gmed_raw,
+                              y = grid_083,
+                              method = 'bilinear')
+```
+
+### Gether dataset and output
+
+#### check
+
+```{r}
+env_data_083 <- rast(list(rast(env_bio), rast(gmed_083)))
+print(paste0('spatial resolution of final data in y：', nrow(env_data_083)))
+print(paste0('spatial resolution of final data in x:', ncol(env_data_083)))
+print(paste0('extent of final dataset：', ext(env_data_083)))
+```
+
+#### 写出
+
+```{r}
+wkdir <- '/Volumes/MarSSD/100_cc_imp_seaweed/res-083/'
+# Save data
+writeRaster(env_data_083, 
+            paste0(wkdir, 'ENV_data/current.grd'), 
+            progress=1)
+```

@@ -1,0 +1,194 @@
+---
+title: "物种的occurance数据"
+output: html_notebook
+---
+
+### 有"种名"的海藻分布数据
+
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+library(obistools)
+library(spocc)
+library(scrubr)
+library(worms)
+library(progress)
+library(furrr)
+```
+
+```{r}
+# 载入种-名单
+seaweed_species_list_path <- '../../Results/Farming_seaweed_name_list.rds'
+seaweed_species_list <- read_rds(seaweed_species_list_path)
+```
+
+#### convert FAO names to worms
+
+```{r}
+correct_worms <- wormsbynames(seaweed_species_list) 
+correct_worms <- correct_worms %>% 
+    filter(
+        !is.na(valid_name),
+        rank == 'Species')
+
+valid_sci_names <- correct_worms$valid_name
+```
+
+#### download data
+
+
+```{r}
+
+dwonloading_batch <- valid_sci_names
+pb <- progress_bar$new(
+    format = "  downloading :what [:bar] :percent eta: :eta",
+    total = length(dwonloading_batch),
+    clear = F,
+    width = 100
+    )
+get_occ_data <- function(query, limit = 10){
+    
+    pb$tick(token = list(what = query))
+    occ_data_raw <- occ(query = query, 
+                    from = c('gbif', 'obis'),
+                    has_coords = T,
+                    limit = limit,
+                    throw_warnings = F)
+    
+    return(occ_data_raw)
+    
+}
+
+occ_data_raw <- map(dwonloading_batch, get_occ_data)
+
+readr::write_rds(occ_data_raw, 
+                 '/Volumes/MarSSD/species_occ_download/occ_query.rds')
+
+```
+
+### data cleaning
+
+#### scrubr for data clean
+
+```{r}
+# res <- read_rds('/Volumes/MarSSD/species_occ_download/all_species.rds')
+
+clean_species <- function(batch){
+    
+    batch_df <- occ2df(batch) # convert to tibble
+    dis_name <- batch$gbif$meta$opts$scientificName # get query names
+    batch_df <- batch_df %>% 
+        mutate(dis_name = dis_name) %>% # add auery name
+        coord_impossible(lat = 'latitude', 'longitude') %>% # drop impossible spatial data
+        coord_imprecise() %>%  # drop points with imprecise spatial coordinate
+        coord_incomplete() %>% # drop points of incomplete coordinate
+        dplyr::rename(decimalLongitude = longitude,
+                      decimalLatitude = latitude) %>% # change column names for 'check_on_land' function
+        rowid_to_column() # add id column for 'check_on_land' function
+    
+    # drop points on land, i.e., museum specimens
+
+    on_land_points <- check_onland(batch_df,
+                                   report = T,
+                                   offline = F)
+    
+    if (length(on_land_points) != 0) {
+        batch_in_marine <- batch_df %>% 
+            filter(!(rowid %in% on_land_points$row)) %>% 
+            rename(longitude = decimalLongitude,
+                   latitude = decimalLatitude)
+    }else {
+        batch_in_marine <- batch_df %>% 
+            rename(longitude = decimalLongitude,
+                   latitude = decimalLatitude)
+    }
+    
+    return(batch_in_marine)
+}
+
+# speed up processing using future_map
+plan('multisession', workers = 5)
+with_progress({
+    p <- progressor(steps = length(res))
+    
+    res_dfs <- future_map(res, ~{
+        p()
+        clean_species(.x)
+        })
+})
+
+# save half-way
+# write_rds(res_dfs, '/Volumes/MarSSD/species_occ_download/clean_records.rds')
+```
+
+#### drop duplicate points
+
+```{r}
+# origin_dfs <- read_rds('/Volumes/MarSSD/species_occ_download/clean_records.rds')
+
+drop_dup <- function(df){
+    
+    recs.dups <- duplicated(df %>% dplyr::select(longitude, latitude))
+    occurrences <- df[!recs.dups, ]
+    
+    return(occurrences)
+    
+}
+
+clean_dfs <- map(clean_dfs, drop_dup)
+
+
+clean_dfs <- bind_rows(clean_dfs)
+```
+
+#### data check
+
+```{r}
+# summarise records for species
+
+clean_dfs %>% 
+    split(.$dis_name) %>% 
+    map_dbl(.f = ~dim(.x)[1]) %>% 
+    stack() %>% 
+    pull(values) %>% sum()
+```
+
+| values | ind                       |
+|-------:|:--------------------------|
+|   2262 | Alaria esculenta          |
+|    138 | Capsosiphon fulvescens    |
+|   2711 | Caulerpa racemosa         |
+|     43 | Chondracanthus chamissoi  |
+|    776 | Codium fragile            |
+|     14 | **Dunaliella salina**     |
+|    147 | Eucheuma denticulatum     |
+|     91 | Gelidium amansii          |
+|   1212 | Gracilaria gracilis       |
+|    434 | Gracilariopsis longissima |
+|     53 | Kappaphycus alvarezii     |
+|   5396 | Laminaria digitata        |
+|   2630 | Macrocystis pyrifera      |
+|     64 | Monostroma nitidum        |
+|   5750 | Palmaria palmata          |
+|     22 | **Pyropia columbina**     |
+|      7 | **Pyropia tenera**        |
+|   2001 | Saccharina japonica       |
+|  11882 | Saccharina latissima      |
+|    437 | Sargassum fusiforme       |
+|   1234 | Ulva prolifera            |
+|   1928 | Undaria pinnatifida       |
+
+### save data
+
+```{r}
+save_csv <- function(df){
+    
+    file_name <- unique(df$dis_name)
+    
+    file_path <- paste0('/Volumes/MarSSD/species_occ_download/', file_name, '.csv')
+    write_csv(df, file = file_path)
+    
+    
+}
+
+map(clean_dfs, save_csv)
+```
